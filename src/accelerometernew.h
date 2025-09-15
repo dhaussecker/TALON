@@ -3,6 +3,10 @@
 
 #include "LSM6DSOXSensor.h"
 #include "graham_generator.h"
+#include <Notecard.h>
+
+// External notecard instance (defined in main.cpp)
+extern Notecard notecard;
 
 #define INT_1 D5  // Changed to D5 as requested
 
@@ -10,6 +14,19 @@ extern volatile bool motionDetected;
 extern volatile int state;
 extern volatile int prevstate;
 extern volatile bool stateChanged;
+
+// Structure to store state change events
+struct StateChangeEvent {
+  int fromState;
+  int toState;
+  unsigned long timestamp;
+};
+
+// Storage for state change events (max 100 events between transmissions)
+#define MAX_STATE_EVENTS 100
+StateChangeEvent stateEvents[MAX_STATE_EVENTS];
+int eventCount = 0;
+unsigned long lastTransmission = 0;
 
 //Interrupts.
 volatile int mems_event = 0;
@@ -58,9 +75,16 @@ void setupLSM6DSOX()
 
   // Initialize state variables
   motionDetected = false;
-  state = -1;
-  prevstate = -1;
+  
+  // Get initial state
+  uint8_t mlc_out[8];
+  AccGyr.Get_MLC_Output(mlc_out);
+  state = mlc_out[0];
+  prevstate = state;
   stateChanged = false;
+  
+  Serial.print("Initial MLC State: ");
+  Serial.println(state);
 }
 
 // Get immediate raw state (for debugging)
@@ -109,53 +133,120 @@ int checkForStateChange()
   if (motionDetected) {
     motionDetected = false; // Reset flag
     
-    LSM6DSOX_MLC_Status_t status;
-    AccGyr.Get_MLC_Status(&status);
-    if (status.is_mlc1) {
-      uint8_t mlc_out[8];
-      AccGyr.Get_MLC_Output(mlc_out);
-      
-      int newState = mlc_out[0];
-      
-      // Check if state actually changed
-      if (newState != prevstate && newState != -1) {
-        prevstate = state;
-        state = newState;
-        stateChanged = true;
-        return newState;
-      }
+    // Get current state directly
+    uint8_t mlc_out[8];
+    AccGyr.Get_MLC_Output(mlc_out);
+    int newState = mlc_out[0];
+    
+    // Debug output
+    Serial.print("Interrupt! Current state: ");
+    Serial.print(state);
+    Serial.print(", New state: ");
+    Serial.print(newState);
+    
+    // Check if state actually changed from our last known state
+    if (newState != state && newState != -1) {
+      prevstate = state;  // Store previous state
+      state = newState;   // Update current state
+      stateChanged = true;
+      Serial.println(" -> CHANGE DETECTED!");
+      return newState;
+    } else {
+      Serial.println(" -> no change");
     }
   }
   return -1;
 }
 
-// Function to check and print state changes (call this in main loop)
-void checkAndPrintStateChange() {
-  // Read current state directly (don't rely only on interrupts)
-  static int lastReportedState = -1;
-  int currentState = getRawState();
-  
-  // Check if state has changed since last check
-  if (currentState != lastReportedState && currentState != -1) {
-    Serial.print("State Change Detected: ");
-    Serial.print(lastReportedState);
+// Add a state change event to storage
+void addStateChangeEvent(int fromState, int toState, unsigned long timestamp) {
+  if (eventCount < MAX_STATE_EVENTS) {
+    stateEvents[eventCount].fromState = fromState;
+    stateEvents[eventCount].toState = toState;
+    stateEvents[eventCount].timestamp = timestamp;
+    eventCount++;
+    
+    Serial.print("State Change Stored: ");
+    Serial.print(fromState);
     Serial.print(" -> ");
-    Serial.println(currentState);
-    
-    Serial.print("Timestamp: ");
-    Serial.println(millis());
-    
-    lastReportedState = currentState;
+    Serial.print(toState);
+    Serial.print(" at ");
+    Serial.println(timestamp);
+  } else {
+    Serial.println("Warning: State event buffer full!");
   }
-  
-  // Also check interrupt-based detection
+}
+
+// Check for interrupt-based state changes and store them
+void checkAndStoreStateChanges() {
+  // First check if interrupt occurred
   int newState = checkForStateChange();
+  
+  // Then check if a state change was detected
   if (stateChanged) {
     stateChanged = false; // Reset flag
-    Serial.print("Interrupt-based State Change: ");
-    Serial.print(prevstate);
-    Serial.print(" -> ");
-    Serial.println(state);
+    addStateChangeEvent(prevstate, state, millis());
+  }
+}
+
+// Send all stored state changes to Notehub
+void sendStateChangesToCloud() {
+  if (eventCount == 0) {
+    Serial.println("No state changes to send");
+    return;
+  }
+  
+  Serial.print("Sending ");
+  Serial.print(eventCount);
+  Serial.println(" state changes to cloud...");
+  
+  // Create JSON note with all state changes
+  J *req = notecard.newRequest("note.add");
+  JAddStringToObject(req, "file", "states.qo");
+  JAddBoolToObject(req, "sync", true);
+  
+  J *body = JAddObjectToObject(req, "body");
+  if (body) {
+    JAddNumberToObject(body, "event_count", eventCount);
+    JAddNumberToObject(body, "collection_start", lastTransmission);
+    JAddNumberToObject(body, "collection_end", millis());
+    
+    // Add events as an array
+    J *events = JAddArrayToObject(body, "events");
+    if (events) {
+      for (int i = 0; i < eventCount; i++) {
+        J *event = JCreateObject();
+        if (event) {
+          JAddNumberToObject(event, "from", stateEvents[i].fromState);
+          JAddNumberToObject(event, "to", stateEvents[i].toState);
+          JAddNumberToObject(event, "time", stateEvents[i].timestamp);
+          JAddItemToArray(events, event);
+        }
+      }
+    }
+  }
+  
+  bool success = notecard.sendRequest(req);
+  
+  if (success) {
+    Serial.print("Successfully sent ");
+    Serial.print(eventCount);
+    Serial.println(" state changes");
+    
+    // Reset for next collection period
+    eventCount = 0;
+    lastTransmission = millis();
+  } else {
+    Serial.println("Failed to send state changes");
+  }
+}
+
+// Check if it's time to send state changes (every 5 minutes)
+void checkStateTransmissionTimer() {
+  const unsigned long FIVE_MINUTES = 5 * 60 * 1000; // 5 minutes in milliseconds
+  
+  if (millis() - lastTransmission >= FIVE_MINUTES) {
+    sendStateChangesToCloud();
   }
 }
 

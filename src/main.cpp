@@ -276,6 +276,9 @@ void setup() {
   // Initialize sensor with MLC
   setupLSM6DSOX();
   
+  // Initialize state change tracking
+  lastTransmission = millis();
+  
   // Initialize regular acceleration readings (restore original functionality)
   if (!initLSM6DSOX()) {
     Serial.println("ERROR: Failed to initialize LSM6DSOX for acceleration readings!");
@@ -297,18 +300,22 @@ void setup() {
 }
 
 void loop() {
-  // Check for MLC state changes
-  checkAndPrintStateChange();
+  // Check for interrupt-based state changes and store them
+  checkAndStoreStateChanges();
   
-  // Debug: Print raw state every 2 seconds to see what MLC is outputting
+  // Check if it's time to send state changes (every 5 minutes)
+  checkStateTransmissionTimer();
+  
+  // Debug: Print current status occasionally
   static unsigned long lastDebug = 0;
-  if (millis() - lastDebug > 2000) {
-    int rawState = getRawState();
-    Serial.print("Current MLC State: ");
-    Serial.println(rawState);
+  if (millis() - lastDebug > 10000) { // Every 10 seconds
+    Serial.print("MLC State: ");
+    Serial.print(getRawState());
+    Serial.print(" | State events stored: ");
+    Serial.println(eventCount);
     lastDebug = millis();
   }
   
-  // Small delay to prevent overwhelming serial output
-  delay(50);
+  // Small delay for system stability
+  delay(10);
 }
