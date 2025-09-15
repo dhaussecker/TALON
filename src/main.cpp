@@ -3,6 +3,7 @@
 #include <Notecard.h>
 #include <cstring>
 #include <cstdlib>
+#include "accelerometernew.h"
 
 #define usbSerial Serial
 
@@ -11,12 +12,6 @@
 // LSM6DSOX I2C addresses
 #define LSM6DSOX_ADDRESS_LOW  0x6A
 #define LSM6DSOX_ADDRESS_HIGH 0x6B
-
-// LSM6DSOX register addresses
-#define LSM6DSOX_WHO_AM_I     0x0F
-#define LSM6DSOX_CTRL1_XL     0x10
-#define LSM6DSOX_STATUS_REG   0x1E
-#define LSM6DSOX_OUTX_L_A     0x28
 
 // Expected WHO_AM_I value
 #define LSM6DSOX_WHO_AM_I_VALUE 0x6C
@@ -278,9 +273,12 @@ void setup() {
   Wire.begin();
   Wire.setClock(400000);
   
-  // Initialize sensor
+  // Initialize sensor with MLC
+  setupLSM6DSOX();
+  
+  // Initialize regular acceleration readings (restore original functionality)
   if (!initLSM6DSOX()) {
-    Serial.println("ERROR: Failed to initialize LSM6DSOX!");
+    Serial.println("ERROR: Failed to initialize LSM6DSOX for acceleration readings!");
     while(1) {
       digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
       delay(500);
@@ -293,10 +291,24 @@ void setup() {
   Serial.print("Max samples per session: ");
   Serial.println(MAX_SAMPLES);
   Serial.println("Ready to start logging...");
+  Serial.println("MLC state detection active - move sensor to see state changes");
   delay(2000);
   log();
 }
 
 void loop() {
-
+  // Check for MLC state changes
+  checkAndPrintStateChange();
+  
+  // Debug: Print raw state every 2 seconds to see what MLC is outputting
+  static unsigned long lastDebug = 0;
+  if (millis() - lastDebug > 2000) {
+    int rawState = getRawState();
+    Serial.print("Current MLC State: ");
+    Serial.println(rawState);
+    lastDebug = millis();
+  }
+  
+  // Small delay to prevent overwhelming serial output
+  delay(50);
 }
